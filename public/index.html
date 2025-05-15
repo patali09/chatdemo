@@ -6,14 +6,19 @@
 </head>
 <body>
     <h1>WebRTC Chat</h1>
-    <div id="videos">
-        <video id="localVideo" autoplay muted></video>
-        <video id="remoteVideo" autoplay></video>
-    </div>
-    <div id="chat">
-        <div id="messages"></div>
-        <input id="messageInput" type="text" placeholder="Type your message...">
-        <button id="sendButton">Send</button>
+    <div id="container">
+        <div id="video-chat-area">
+            <video id="remoteVideo" autoplay></video>
+            <video id="localVideo" autoplay muted></video>
+        </div>
+        <div id="chat-sidebar">
+            <h2>Chat</h2>
+            <div id="messages"></div>
+            <div id="input-area">
+                <input id="messageInput" type="text" placeholder="Type your message...">
+                <button id="sendButton">Send</button>
+            </div>
+        </div>
     </div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="js/main.js"></script>
