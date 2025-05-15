@@ -61,12 +61,14 @@ io.on('connection', (socket) => {
     });
 
     socket.on('chat-message', (message) => {
-        const partnerId = connectedUsers[socket.id]?.otherUserId;
-        console.log(`[Server] Chat message from ${socket.id} to ${partnerId}: ${message}`);
+        const partnerId = connectedUsers[socket.id]?.otherUserId;        
         if (partnerId && connectedUsers[partnerId]) {
+            // Send the message to the partner
             io.to(partnerId).emit('chat-message', { message, from: socket.id });
         } else {
-            console.warn(`[Server] Cannot relay chat message: partner not found for ${socket.id}`);
+            // If no partner is found, store the message or handle it appropriately
+            // Let the sender know the message wasn't delivered
+            socket.emit('system-message', 'Your message could not be delivered. No connection established yet.');
         }
     });
 
