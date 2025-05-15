@@ -1,251 +1,354 @@
+// DOM elements
 const localVideo = document.getElementById('localVideo');
 const remoteVideo = document.getElementById('remoteVideo');
 const messageInput = document.getElementById('messageInput');
 const sendButton = document.getElementById('sendButton');
 const messagesDiv = document.getElementById('messages');
+const roomCodeInput = document.getElementById('roomCodeInput');
+const joinRoomButton = document.getElementById('joinRoomButton');
+const createRoomButton = document.getElementById('createRoomButton');
+const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+const roomInfo = document.getElementById('roomInfo');
+const roomConnection = document.getElementById('room-connection');
+const container = document.getElementById('container');
+const leaveRoomButton = document.getElementById('leaveRoomButton');
+const roomLabel = document.getElementById('roomLabel');
 
+// Global variables
 const socket = io();
 let localStream;
 let peerConnection;
-let otherUserId; // To store the ID of the other user in the chat
+let currentRoomCode = null;
+let currentPeerId = null;
 
-const servers = {
+// ICE Servers (STUN/TURN)
+const iceServers = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' } // Example STUN server
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' }
     ]
 };
 
-// Add a status message to show we're starting
-appendMessage('System: Starting connection...');
+// ===== ROOM MANAGEMENT =====
 
-// Function to signal that this client is ready to connect
-function signalReady() {
-    socket.emit('ready');
-    console.log('[Client] Emitted \'ready\' to server');
-    appendMessage('System: Waiting for another user...');
-}
-
-// Get local media
-navigator.mediaDevices.getUserMedia({ 
-    video: true, 
-    audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-    } 
-})
-.then(stream => {
-    console.log('[Client] Media stream obtained');
-    localVideo.srcObject = stream;
-    localStream = stream;
-    
-    // Log info about the stream we got
-    if (typeof logStreamInfo === 'function') {
-        logStreamInfo(stream, 'Local stream');
-    }
-    
-    // Make sure audio is enabled
-    if (typeof ensureAudioEnabled === 'function') {
-        ensureAudioEnabled(stream);
-    }
-    
-    // Signal ready after successful media acquisition
-    signalReady();
-})
-.catch(error => {
-    console.error('[Client] Error accessing media devices:', error);
-    appendMessage('System: Could not access camera or microphone. Chat will work, but not video/audio.');
-    
-    // Even if media access fails, still signal ready for chat-only mode
-    signalReady();
+// Create a new room
+createRoomButton.addEventListener('click', () => {
+    appendMessage('System: Creating a new room...');
+    socket.emit('create-room');
 });
 
-function createPeerConnection(targetUserId) {
-    console.log(`[Client] Creating new PeerConnection for target ${targetUserId}`);
-    if (peerConnection) {
-        console.log('[Client] Closing existing peer connection before creating a new one.');
-        peerConnection.close();
+// Join an existing room
+joinRoomButton.addEventListener('click', () => {
+    const roomCode = roomCodeInput.value.trim().toUpperCase();
+    if (roomCode.length >= 4) {
+        appendMessage(`System: Joining room ${roomCode}...`);
+        socket.emit('join-room', { roomCode });
+    } else {
+        appendMessage('System: Please enter a valid room code.');
     }
-    
-    try {
-        peerConnection = new RTCPeerConnection(servers);
-        otherUserId = targetUserId; // Store the ID of the user we are connecting to
+});
 
-        // Add local media tracks if we have them
-        if (localStream) {
-            localStream.getTracks().forEach(track => {
-                try {
-                    console.log('[Client] Adding local track to PeerConnection:', track.kind);
-                    peerConnection.addTrack(track, localStream);
-                } catch (e) {
-                    console.error('[Client] Error adding track to peer connection:', e);
-                }
-            });
-        } else {
-            console.warn('[Client] No local stream available, creating connection without media');
-            // We can still create a data channel for text chat
-            try {
-                const dataChannel = peerConnection.createDataChannel('chat');
-                console.log('[Client] Created data channel for chat (fallback)');
-            } catch (e) {
-                console.error('[Client] Error creating data channel:', e);
-            }
-        }
+// Leave current room
+leaveRoomButton.addEventListener('click', () => {
+    leaveRoom();
+});
 
-        peerConnection.ontrack = event => {
-            console.log('[Client] Remote track received:', event.track.kind);
-            
-            try {
-                // Make sure we have a remote stream to add tracks to
-                if (!remoteVideo.srcObject) {
-                    console.log('[Client] Creating new MediaStream for remote tracks');
-                    remoteVideo.srcObject = new MediaStream();
-                }
-                
-                // Add this track to the remote stream
-                console.log(`[Client] Adding ${event.track.kind} track to remote stream`);
-                remoteVideo.srcObject.addTrack(event.track);
-                
-                // For audio tracks, make sure they're enabled
-                if (event.track.kind === 'audio') {
-                    event.track.enabled = true;
-                    console.log('[Client] Audio track enabled');
-                }
-            } catch (e) {
-                console.error('[Client] Error handling remote track:', e);
-            }
-        };
-
-        peerConnection.onicecandidate = event => {
-            if (event.candidate) {
-                console.log(`[Client] Sending ICE candidate to ${otherUserId}:`, event.candidate);
-                socket.emit('candidate', { candidate: event.candidate, to: otherUserId });
-            } else {
-                console.log('[Client] All ICE candidates have been sent.');
-            }
-        };
-
-        peerConnection.oniceconnectionstatechange = () => {
-            console.log(`[Client] ICE connection state changed: ${peerConnection.iceConnectionState}`);
-            if (peerConnection.iceConnectionState === 'failed' ||
-                peerConnection.iceConnectionState === 'disconnected' ||
-                peerConnection.iceConnectionState === 'closed') {
-                console.error('[Client] ICE connection failed or disconnected.');
-                appendMessage('System: Connection issue detected. Try refreshing the page.');
-            }
-        };
-
-        peerConnection.onconnectionstatechange = () => {
-            console.log(`[Client] Peer connection state changed: ${peerConnection.connectionState}`);
-            if (peerConnection.connectionState === 'connected') {
-                console.log('[Client] Peers connected!');
-                appendMessage('System: Connection established.');
-                
-                // After connection is established, log remote stream info
-                if (remoteVideo.srcObject && typeof logStreamInfo === 'function') {
-                    logStreamInfo(remoteVideo.srcObject, 'Remote stream');
-                    
-                    // Double-check audio track is enabled on the remote stream
-                    const audioTracks = remoteVideo.srcObject.getAudioTracks();
-                    if (audioTracks.length > 0) {
-                        audioTracks.forEach(track => {
-                            track.enabled = true;
-                            console.log('[Client] Ensuring remote audio track is enabled:', track.id);
-                        });
-                    }
-                }
-            } else if (peerConnection.connectionState === 'failed') {
-                console.error('[Client] Peer connection failed.');
-                appendMessage('System: Connection failed.');
-            }
-        };
-        
-        return peerConnection;
-    } catch (e) {
-        console.error('[Client] Error creating peer connection:', e);
-        appendMessage('System: Failed to establish connection. Please refresh and try again.');
-        return null;
+// Function to leave the current room
+function leaveRoom() {
+    if (currentRoomCode) {
+        socket.emit('leave-room');
+        stopMediaAndResetConnection();
+        showRoomInterface();
+        appendMessage('System: You have left the room.');
+        currentRoomCode = null;
+        currentPeerId = null;
     }
 }
 
-socket.on('make-offer', (targetUserId) => {
-    console.log(`[Client] Received 'make-offer' from server for user ${targetUserId}. Creating offer.`);
-    const pc = createPeerConnection(targetUserId);
-    if (!pc) return;
+// Function to show the chat and video interface
+function showChatInterface() {
+    roomConnection.classList.add('hidden');
+    container.classList.remove('hidden');
+}
+
+// Function to show the room connection interface
+function showRoomInterface() {
+    roomConnection.classList.remove('hidden');
+    container.classList.add('hidden');
+}
+
+// ===== SOCKET EVENT HANDLERS =====
+
+// Room created successfully
+socket.on('room-created', ({ roomCode }) => {
+    currentRoomCode = roomCode;
+    roomCodeDisplay.textContent = roomCode;
+    roomInfo.classList.remove('hidden');
+    appendMessage(`System: Room created! Your room code is ${roomCode}`);
+    appendMessage('System: Waiting for someone to join...');
     
-    pc.createOffer()
-        .then(offer => {
-            console.log('[Client] Offer created, setting local description.');
-            return pc.setLocalDescription(offer);
-        })
-        .then(() => {
-            console.log(`[Client] Local description set. Sending offer to ${targetUserId}.`);
-            socket.emit('offer', { offer: pc.localDescription, to: targetUserId });
-        })
-        .catch(e => {
-            console.error('[Client] Error creating or sending offer:', e);
-            appendMessage('System: Could not create connection offer. Try refreshing.');
-        });
+    // Setup for when the peer connects
+    roomLabel.textContent = `(Room: ${roomCode})`;
+    
+    // Set up the local media
+    setupLocalMedia();
 });
 
-socket.on('wait-for-offer', (sourceUserId) => {
-    console.log(`[Client] Received 'wait-for-offer' from server. Will wait for offer from ${sourceUserId}.`);
-    otherUserId = sourceUserId;
-    appendMessage('System: Connecting to the other user...');
+// Room joined successfully
+socket.on('room-joined', ({ roomCode }) => {
+    currentRoomCode = roomCode;
+    appendMessage(`System: Joined room ${roomCode}`);
+    roomLabel.textContent = `(Room: ${roomCode})`;
+    
+    // Show the chat interface
+    showChatInterface();
+    
+    // Set up the local media
+    setupLocalMedia();
 });
 
-socket.on('offer-received', ({ offer, from }) => {
-    console.log(`[Client] Offer received from ${from}.`);
-    if (!peerConnection || otherUserId !== from) {
-        // Ensure peerConnection is created for the correct user if not already
-        const pc = createPeerConnection(from);
-        if (!pc) return;
+// Error joining a room
+socket.on('room-error', ({ error }) => {
+    appendMessage(`System Error: ${error}`);
+});
+
+// Room is ready (two users are connected)
+socket.on('room-ready', ({ roomCode }) => {
+    appendMessage('System: Another user has joined the room.');
+    // The room is ready for the call, but wait for start-call or peer-ready
+});
+
+// Start a call (initiator)
+socket.on('start-call', ({ target }) => {
+    appendMessage('System: Initiating call...');
+    currentPeerId = target;
+    
+    // Create the peer connection and send an offer
+    createPeerConnection(target);
+});
+
+// Peer is ready with media
+socket.on('peer-ready', ({ from }) => {
+    appendMessage('System: Peer is ready with media.');
+    currentPeerId = from;
+    
+    // If we're the initiator, createPeerConnection was already called
+    // from the start-call event. Otherwise, it's done when we receive an offer.
+});
+
+// WebRTC Offer received
+socket.on('offer', ({ offer, from }) => {
+    appendMessage('System: Received call offer.');
+    currentPeerId = from;
+    
+    // Create peer connection if it doesn't exist
+    if (!peerConnection) {
+        createPeerConnection(from);
     }
     
+    // Set the remote description and create an answer
     peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
         .then(() => {
-            console.log('[Client] Remote description (offer) set. Creating answer.');
             return peerConnection.createAnswer();
         })
         .then(answer => {
-            console.log('[Client] Answer created, setting local description.');
             return peerConnection.setLocalDescription(answer);
         })
         .then(() => {
-            console.log(`[Client] Local description (answer) set. Sending answer to ${from}.`);
-            socket.emit('answer', { answer: peerConnection.localDescription, to: from });
+            socket.emit('answer', { 
+                answer: peerConnection.localDescription, 
+                to: from 
+            });
         })
-        .catch(e => {
-            console.error('[Client] Error handling offer or creating answer:', e);
-            appendMessage('System: Connection issue. Try refreshing the page.');
+        .catch(error => {
+            appendMessage('System: Error establishing connection. Please refresh and try again.');
         });
 });
 
-socket.on('answer-received', ({ answer, from }) => {
-    console.log(`[Client] Answer received from ${from}.`);
-    if (peerConnection && otherUserId === from) {
+// WebRTC Answer received
+socket.on('answer', ({ answer, from }) => {
+    if (peerConnection && currentPeerId === from) {
         peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
-            .then(() => console.log('[Client] Remote description (answer) set.'))
-            .catch(e => console.error('[Client] Error setting remote description (answer):', e));
-    } else {
-        console.warn('[Client] Received answer but peerConnection is not set up for this user or does not exist.');
+            .catch(error => {
+                appendMessage('System: Error establishing connection.');
+            });
     }
 });
 
-socket.on('candidate-received', ({ candidate, from }) => {
-    console.log(`[Client] ICE candidate received from ${from}.`);
-    if (peerConnection && otherUserId === from) {
+// WebRTC ICE Candidate received
+socket.on('ice-candidate', ({ candidate, from }) => {
+    if (peerConnection && currentPeerId === from) {
         peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
-            .then(() => console.log('[Client] Added received ICE candidate.'))
-            .catch(e => console.error('[Client] Error adding received ICE candidate:', e));
-    } else {
-        console.warn('[Client] Received ICE candidate but peerConnection is not set up for this user or does not exist.');
+            .catch(error => {
+                appendMessage('System: Error with connection setup.');
+            });
     }
 });
 
-// Chat functionality
+// Chat message received
+socket.on('chat-message', ({ message, from }) => {
+    appendMessage(`Peer: ${message}`);
+});
+
+// System message received
+socket.on('system-message', ({ message }) => {
+    appendMessage(`System: ${message}`);
+});
+
+// Peer left the room
+socket.on('peer-left', ({ peerId }) => {
+    appendMessage('System: The other user has left the room.');
+    if (remoteVideo.srcObject) {
+        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+        remoteVideo.srcObject = null;
+    }
+    
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    
+    currentPeerId = null;
+});
+
+// ===== WEBRTC FUNCTIONS =====
+
+// Setup local media
+function setupLocalMedia() {
+    if (localStream) {
+        // If we already have a stream, use it
+        showChatInterface();
+        socket.emit('user-ready');
+        return;
+    }
+    
+    appendMessage('System: Requesting camera and microphone access...');
+    
+    navigator.mediaDevices.getUserMedia({ 
+        video: true, 
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+        } 
+    })
+    .then(stream => {
+        localStream = stream;
+        localVideo.srcObject = stream;
+        
+        showChatInterface();
+        
+        // Notify the server that we're ready with media
+        socket.emit('user-ready');
+    })
+    .catch(error => {
+        appendMessage('System: Could not access camera or microphone. Chat will still work.');
+        
+        // Still show the chat interface, but without media
+        showChatInterface();
+        
+        // Let the server know we're ready, even without media
+        socket.emit('user-ready');
+    });
+}
+
+// Create a peer connection
+function createPeerConnection(peerId) {
+    if (peerConnection) {
+        peerConnection.close();
+    }
+    
+    peerConnection = new RTCPeerConnection(iceServers);
+    
+    // Add local stream tracks to the connection
+    if (localStream) {
+        localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+        });
+    }
+    
+    // Handle incoming streams
+    peerConnection.ontrack = event => {
+        if (!remoteVideo.srcObject) {
+            remoteVideo.srcObject = new MediaStream();
+        }
+        remoteVideo.srcObject.addTrack(event.track);
+    };
+    
+    // Handle ICE candidates
+    peerConnection.onicecandidate = event => {
+        if (event.candidate) {
+            socket.emit('ice-candidate', {
+                candidate: event.candidate,
+                to: peerId
+            });
+        }
+    };
+    
+    // Connection state changes
+    peerConnection.onconnectionstatechange = () => {
+        if (peerConnection.connectionState === 'connected') {
+            appendMessage('System: Connected to peer!');
+        } else if (peerConnection.connectionState === 'disconnected' || 
+                  peerConnection.connectionState === 'failed' ||
+                  peerConnection.connectionState === 'closed') {
+            appendMessage('System: Peer connection lost.');
+        }
+    };
+    
+    // ICE connection state changes
+    peerConnection.oniceconnectionstatechange = () => {
+        if (peerConnection.iceConnectionState === 'disconnected' ||
+            peerConnection.iceConnectionState === 'failed') {
+            appendMessage('System: Connection to peer lost. You can wait for them to rejoin or leave the room.');
+        }
+    };
+    
+    // If we're the initiator, create and send an offer
+    if (peerId === currentPeerId) {
+        peerConnection.createOffer()
+            .then(offer => {
+                return peerConnection.setLocalDescription(offer);
+            })
+            .then(() => {
+                socket.emit('offer', {
+                    offer: peerConnection.localDescription,
+                    to: peerId
+                });
+            })
+            .catch(error => {
+                appendMessage('System: Error establishing connection. Please refresh and try again.');
+            });
+    }
+    
+    return peerConnection;
+}
+
+// Stop media and reset connection
+function stopMediaAndResetConnection() {
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    
+    if (remoteVideo.srcObject) {
+        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+        remoteVideo.srcObject = null;
+    }
+    
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+        localVideo.srcObject = null;
+    }
+}
+
+// ===== CHAT FUNCTIONS =====
+
+// Send a chat message
 sendButton.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', function (e) {
+messageInput.addEventListener('keypress', function(e) {
     if (e.key === 'Enter') {
         sendMessage();
     }
@@ -253,39 +356,24 @@ messageInput.addEventListener('keypress', function (e) {
 
 function sendMessage() {
     const message = messageInput.value.trim();
-    if (message !== '') {
-        console.log(`[Client] Sending message: ${message}`);
+    if (message !== '' && currentRoomCode) {
         appendMessage(`You: ${message}`);
-        socket.emit('chat-message', message);
+        socket.emit('chat-message', { 
+            message,
+            roomCode: currentRoomCode
+        });
         messageInput.value = '';
     }
 }
 
-socket.on('chat-message', ({ message, from }) => {
-    console.log(`[Client] Received chat message from ${from}: ${message}`);
-    appendMessage(`Remote: ${message}`);
-});
-
+// Append a message to the chat
 function appendMessage(message) {
     const messageElement = document.createElement('div');
-    messageElement.textContent = message; // Use textContent for security
+    messageElement.textContent = message;
     messagesDiv.appendChild(messageElement);
-    messagesDiv.scrollTop = messagesDiv.scrollHeight; // Scroll to the bottom
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// Handle user disconnection
-socket.on('user-disconnected', (userId) => {
-    console.log(`[Client] User ${userId} disconnected.`);
-    appendMessage(`System: The other user disconnected.`);
-    if (remoteVideo.srcObject) {
-        remoteVideo.srcObject.getTracks().forEach(track => track.stop());
-    }
-    remoteVideo.srcObject = null;
-    if (peerConnection && otherUserId === userId) {
-        console.log('[Client] Closing peer connection due to user disconnection.');
-        peerConnection.close();
-        peerConnection = null;
-        otherUserId = null;
-        appendMessage('System: Ready for a new connection. Refresh if needed.');
-    }
-});
+// Initialize the app
+appendMessage('System: Welcome to WebRTC Chat!');
+appendMessage('System: Create a new room or join an existing one to start.');

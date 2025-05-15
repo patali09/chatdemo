@@ -28,7 +28,6 @@ function checkAudioLevels(stream) {
             }
             
             const average = values / length;
-            console.log("[Audio Debug] Audio level: " + average);
             
             // Clean up after a few seconds to avoid memory leaks
             setTimeout(() => {
@@ -38,18 +37,14 @@ function checkAudioLevels(stream) {
             }, 5000);
         };
         
-        console.log("[Audio Debug] Audio analyzer connected");
-        
         return {
             stop: function() {
                 javascriptNode.disconnect();
                 analyser.disconnect();
                 microphone.disconnect();
-                console.log("[Audio Debug] Audio analyzer stopped");
             }
         };
     } catch (e) {
-        console.error("[Audio Debug] Error setting up audio analyzer:", e);
         return { stop: function() {} };
     }
 }
@@ -62,50 +57,26 @@ function ensureAudioEnabled(stream) {
     if (audioTrack) {
         if (!audioTrack.enabled) {
             audioTrack.enabled = true;
-            console.log("[Audio Debug] Enabled audio track");
         }
         return true;
     }
-    console.warn("[Audio Debug] No audio track found in stream");
     return false;
 }
 
 // Debug function to log info about media streams
 function logStreamInfo(stream, label) {
     if (!stream) {
-        console.log(`[Media Debug] ${label || 'Stream'}: null or undefined`);
         return;
     }
     
+    // Simply return stream info without logging
     const videoTracks = stream.getVideoTracks();
     const audioTracks = stream.getAudioTracks();
     
-    console.log(`[Media Debug] ${label || 'Stream'} info:`, {
+    return {
         id: stream.id,
         active: stream.active,
         videoTracks: videoTracks.length,
         audioTracks: audioTracks.length
-    });
-    
-    videoTracks.forEach((track, i) => {
-        console.log(`[Media Debug] Video track ${i}:`, {
-            id: track.id,
-            kind: track.kind,
-            label: track.label,
-            enabled: track.enabled,
-            muted: track.muted,
-            readyState: track.readyState
-        });
-    });
-    
-    audioTracks.forEach((track, i) => {
-        console.log(`[Media Debug] Audio track ${i}:`, {
-            id: track.id,
-            kind: track.kind,
-            label: track.label,
-            enabled: track.enabled,
-            muted: track.muted,
-            readyState: track.readyState
-        });
-    });
+    };
 }

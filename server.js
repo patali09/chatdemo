@@ -8,84 +8,170 @@ const io = socketIo(server);
 
 app.use(express.static('public'));
 
-let connectedUsers = {}; // Store socket.id -> { isReady: false, otherUserId: null }
+// Store rooms and connected users
+const rooms = {}; // roomCode -> { users: [socketId1, socketId2], isLocked: false }
+const users = {}; // socketId -> { roomCode: string }
+
+// Generate a random 6-character room code
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed similar-looking characters
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+}
 
 io.on('connection', (socket) => {
-    console.log(`[Server] User connected: ${socket.id}`);
-    connectedUsers[socket.id] = { isReady: false, otherUserId: null };
-    const userIds = Object.keys(connectedUsers);
-    console.log(`[Server] Current users: ${userIds.join(', ')}`);
+    // Create a new room
+    socket.on('create-room', () => {
+        // Generate a unique room code
+        let roomCode;
+        do {
+            roomCode = generateRoomCode();
+        } while (rooms[roomCode]);
 
-    socket.on('ready', () => {
-        console.log(`[Server] User ready: ${socket.id}`);
-        if (connectedUsers[socket.id]) {
-            connectedUsers[socket.id].isReady = true;
+        // Create the room with this user as first participant
+        rooms[roomCode] = {
+            users: [socket.id],
+            isLocked: false
+        };
+
+        // Add user to the room
+        users[socket.id] = { roomCode };
+        
+        // Join the socket to the room
+        socket.join(roomCode);
+        
+        // Inform the client about the created room
+        socket.emit('room-created', { roomCode });
+    });
+
+    // Join an existing room
+    socket.on('join-room', ({ roomCode }) => {
+        // Check if room exists
+        if (!rooms[roomCode]) {
+            socket.emit('room-error', { error: 'Room does not exist' });
+            return;
         }
 
-        const readyUserIds = userIds.filter(id => connectedUsers[id] && connectedUsers[id].isReady);
-        console.log(`[Server] Ready users: ${readyUserIds.join(', ')}`);
+        // Check if room is full (max 2 users)
+        if (rooms[roomCode].users.length >= 2) {
+            socket.emit('room-error', { error: 'Room is full' });
+            return;
+        }
 
-        if (readyUserIds.length === 2) {
-            const user1 = readyUserIds[0];
-            const user2 = readyUserIds[1];
+        // Check if room is locked (in an active call)
+        if (rooms[roomCode].isLocked) {
+            socket.emit('room-error', { error: 'Room is currently in an active call' });
+            return;
+        }
+
+        // Add user to room
+        rooms[roomCode].users.push(socket.id);
+        users[socket.id] = { roomCode };
+        
+        // Join the socket to the room
+        socket.join(roomCode);
+        
+        console.log(`[Server] User ${socket.id} joined room ${roomCode}`);
+        
+        // Notify the client they've joined
+        socket.emit('room-joined', { roomCode });
+        
+        // If two users are in the room, lock it and start the call
+        if (rooms[roomCode].users.length === 2) {
+            rooms[roomCode].isLocked = true;
             
-            // Arbitrarily make user1 the offerer to user2
-            if (connectedUsers[user1]) connectedUsers[user1].otherUserId = user2;
-            if (connectedUsers[user2]) connectedUsers[user2].otherUserId = user1;
-
-            console.log(`[Server] Two users ready. Telling ${user1} to make an offer to ${user2}`);
-            io.to(user1).emit('make-offer', user2);
-            console.log(`[Server] Telling ${user2} to wait for an offer from ${user1}`);
-            io.to(user2).emit('wait-for-offer', user1);
-        } else if (readyUserIds.length > 2) {
-            console.warn("[Server] More than two users are ready. This simple setup handles only two.");
-            // Basic handling: disconnect extra users or implement room logic
-        } else {
-            console.log('[Server] Waiting for another user to become ready.');
+            const user1 = rooms[roomCode].users[0];
+            const user2 = rooms[roomCode].users[1];
+            
+            // Notify all users in the room
+            io.to(roomCode).emit('room-ready', { roomCode });
+            
+            // Designate the first user to initiate the call
+            io.to(user1).emit('start-call', { target: user2 });
         }
     });
 
+    // User ready with media
+    socket.on('user-ready', () => {
+        if (!users[socket.id] || !users[socket.id].roomCode) {
+            return;
+        }
+        
+        const roomCode = users[socket.id].roomCode;
+        console.log(`[Server] User ${socket.id} is ready in room ${roomCode}`);
+        
+        // Broadcast to the other user in the room
+        socket.to(roomCode).emit('peer-ready', { from: socket.id });
+    });
+
+    // WebRTC signaling: offer
     socket.on('offer', ({ offer, to }) => {
-        console.log(`[Server] Relaying offer from ${socket.id} to ${to}`);
-        io.to(to).emit('offer-received', { offer: offer, from: socket.id });
+        io.to(to).emit('offer', { offer, from: socket.id });
     });
 
+    // WebRTC signaling: answer
     socket.on('answer', ({ answer, to }) => {
-        console.log(`[Server] Relaying answer from ${socket.id} to ${to}`);
-        io.to(to).emit('answer-received', { answer: answer, from: socket.id });
+        io.to(to).emit('answer', { answer, from: socket.id });
     });
 
-    socket.on('candidate', ({ candidate, to }) => {
-        console.log(`[Server] Relaying ICE candidate from ${socket.id} to ${to}`);
-        io.to(to).emit('candidate-received', { candidate: candidate, from: socket.id });
+    // WebRTC signaling: ice candidate
+    socket.on('ice-candidate', ({ candidate, to }) => {
+        io.to(to).emit('ice-candidate', { candidate, from: socket.id });
     });
 
-    socket.on('chat-message', (message) => {
-        const partnerId = connectedUsers[socket.id]?.otherUserId;        
-        if (partnerId && connectedUsers[partnerId]) {
-            // Send the message to the partner
-            io.to(partnerId).emit('chat-message', { message, from: socket.id });
-        } else {
-            // If no partner is found, store the message or handle it appropriately
-            // Let the sender know the message wasn't delivered
-            socket.emit('system-message', 'Your message could not be delivered. No connection established yet.');
+    // Chat message
+    socket.on('chat-message', ({ message, roomCode }) => {
+        if (!users[socket.id] || users[socket.id].roomCode !== roomCode) {
+            socket.emit('system-message', { message: 'You are not connected to this room' });
+            return;
         }
+        
+        socket.to(roomCode).emit('chat-message', { message, from: socket.id });
     });
 
+    // Leave room
+    socket.on('leave-room', () => {
+        handleUserLeaving(socket.id);
+    });
+
+    // Disconnect
     socket.on('disconnect', () => {
-        console.log(`[Server] User disconnected: ${socket.id}`);
-        const disconnectedUserPartner = connectedUsers[socket.id] ? connectedUsers[socket.id].otherUserId : null;
-        delete connectedUsers[socket.id];
-
-        if (disconnectedUserPartner && connectedUsers[disconnectedUserPartner]) {
-            console.log(`[Server] Notifying ${disconnectedUserPartner} about ${socket.id}'s disconnection.`);
-            io.to(disconnectedUserPartner).emit('user-disconnected', socket.id);
-            // Reset partner's otherUserId
-            connectedUsers[disconnectedUserPartner].otherUserId = null;
-            connectedUsers[disconnectedUserPartner].isReady = false; // Mark as not ready for a new pairing
-        }
-        console.log(`[Server] Remaining users: ${Object.keys(connectedUsers).join(', ')}`);
+        handleUserLeaving(socket.id);
     });
+
+    // Helper function to handle a user leaving
+    function handleUserLeaving(userId) {
+        if (!users[userId]) return;
+        
+        const roomCode = users[userId].roomCode;
+        
+        if (roomCode && rooms[roomCode]) {
+            console.log(`[Server] User ${userId} leaving room ${roomCode}`);
+            
+            // Remove user from the room
+            rooms[roomCode].users = rooms[roomCode].users.filter(id => id !== userId);
+            
+            // Notify other users in the room
+            socket.to(roomCode).emit('peer-left', { peerId: userId });
+            
+            // If room is empty, delete it
+            if (rooms[roomCode].users.length === 0) {
+                delete rooms[roomCode];
+            } else {
+                // Unlock the room so new users can join
+                rooms[roomCode].isLocked = false;
+            }
+            
+            // Leave the socket room
+            socket.leave(roomCode);
+        }
+        
+        // Remove user from users object
+        delete users[userId];
+    }
 });
 
 const PORT = process.env.PORT || 3000;
